@@ -1,11 +1,11 @@
 import os
 import sys
 import torch
-import speech_recognition as sr
-import pyttsx3
 import threading
 import queue
 import platform
+import AppKit
+import Foundation
 
 # Torch and MPS (Metal Performance Shaders) configuration
 torch.backends.mps.is_available()
@@ -17,10 +17,57 @@ from transformers import (
     GPTNeoXForCausalLM
 )
 
+class MacSpeechRecognizer:
+    def __init__(self):
+        """
+        Native macOS speech recognition using AppKit
+        """
+        self.recognizer = AppKit.NSSpeechRecognizer.alloc().init()
+        self.recognizer.setListensInForegroundOnly_(False)
+        self.recognizer.setBlocksOtherRecognizers_(True)
+        
+        # Language set to Japanese
+        self.recognizer.setLanguage_("ja-JP")
+        
+        # Callback setup
+        self.recognized_text = None
+        self.recognition_complete = threading.Event()
+        
+        def callback(text):
+            self.recognized_text = text
+            self.recognition_complete.set()
+        
+        self.callback = callback
+
+    def listen(self, timeout=5):
+        """
+        Listen for speech input
+        
+        Args:
+            timeout (int): Maximum listening time
+        
+        Returns:
+            str: Recognized text or None
+        """
+        # Reset state
+        self.recognized_text = None
+        self.recognition_complete.clear()
+        
+        # Start listening
+        self.recognizer.startListening()
+        
+        # Wait for recognition
+        self.recognition_complete.wait(timeout=timeout)
+        
+        # Stop listening
+        self.recognizer.stopListening()
+        
+        return self.recognized_text
+
 class JapaneseChatbot:
     def __init__(self, model_id="rinna/japanese-gpt-neox-3.6b", hf_token=None):
         """
-        Initialize chatbot with M1 Pro optimizations and audio support.
+        Initialize chatbot with M1 Pro optimizations and native macOS audio support.
         
         Args:
             model_id (str): Model identifier
@@ -35,9 +82,8 @@ class JapaneseChatbot:
 
         # Audio setup
         try:
-            # Speech Recognition setup
-            self.recognizer = sr.Recognizer()
-            self.microphone = sr.Microphone()
+            # Native macOS Speech Recognition
+            self.speech_recognizer = MacSpeechRecognizer()
             
             # Text-to-Speech setup for macOS
             self.tts_engine = self._setup_tts()
@@ -90,29 +136,24 @@ class JapaneseChatbot:
 
     def _setup_tts(self):
         """
-        Set up Text-to-Speech for macOS with native voices.
+        Set up Text-to-Speech for macOS using NSSpeechSynthesizer.
         
         Returns:
-            pyttsx3.Engine: Configured TTS engine
+            NSSpeechSynthesizer: Configured speech synthesizer
         """
-        tts_engine = pyttsx3.init()
+        synthesizer = AppKit.NSSpeechSynthesizer.alloc().init()
         
-        # macOS-specific voice configuration
-        tts_engine.setProperty('rate', 150)
-        
-        # Try to find a Japanese voice on macOS
-        voices = tts_engine.getProperty('voices')
+        # Set Japanese voice if available
+        voices = AppKit.NSSpeechSynthesizer.availableVoices()
         japanese_voices = [
             voice for voice in voices 
-            if 'japanese' in voice.name.lower() or 
-               'Japan' in voice.name or 
-               'ja_JP' in voice.name
+            if 'ja_JP' in voice or 'Japanese' in voice
         ]
         
         if japanese_voices:
-            tts_engine.setProperty('voice', japanese_voices[0].id)
+            synthesizer.setVoice_(japanese_voices[0])
         
-        return tts_engine
+        return synthesizer
 
     def listen_for_audio(self):
         """
@@ -120,13 +161,12 @@ class JapaneseChatbot:
         """
         while True:
             try:
-                with self.microphone as source:
-                    print("🎤 듣고 있습니다... (말씀해 주세요)")
-                    self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                    audio = self.recognizer.listen(source)
-                    
-                    # Add audio to queue for processing
-                    self.audio_queue.put(audio)
+                print("🎤 듣고 있습니다... (말씀해 주세요)")
+                text = self.speech_recognizer.listen()
+                
+                if text:
+                    # Add recognized text to queue for processing
+                    self.audio_queue.put(text)
             
             except Exception as e:
                 print(f"음성 수신 오류: {e}")
@@ -138,31 +178,22 @@ class JapaneseChatbot:
         """
         while True:
             try:
-                # Wait for audio in queue
-                audio = self.audio_queue.get()
+                # Wait for text in queue
+                text = self.audio_queue.get()
                 
-                try:
-                    # Recognize speech (Japanese)
-                    text = self.recognizer.recognize_google(audio, language='ja-JP')
-                    print(f"🔊 인식된 텍스트: {text}")
-                    
-                    # Check for exit commands
-                    if text.lower() in ['exit', '종료', '나가기', 'quit']:
-                        print("🤖 대화를 종료합니다.")
-                        break
-                    
-                    # Generate response
-                    response = self.generate_response(text)
-                    print("🤖:", response)
-                    
-                    # Speak response
-                    self.tts_engine.say(response)
-                    self.tts_engine.runAndWait()
+                # Check for exit commands
+                if text.lower() in ['exit', '종료', '나가기', 'quit']:
+                    print("🤖 대화를 종료합니다.")
+                    break
                 
-                except sr.UnknownValueError:
-                    print("🤷 음성을 인식할 수 없습니다.")
-                except sr.RequestError as e:
-                    print(f"음성 인식 서비스 오류: {e}")
+                print(f"🔊 인식된 텍스트: {text}")
+                
+                # Generate response
+                response = self.generate_response(text)
+                print("🤖:", response)
+                
+                # Speak response using native macOS speech
+                self.tts_engine.startSpeakingString_(response)
             
             except Exception as e:
                 print(f"오디오 처리 오류: {e}")
